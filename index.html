@@ -1,0 +1,286 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Продвинутый анализатор видео</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 20px; background: #f5f5f5; }
+        .container { background: white; padding: 20px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
+        input[type="text"] { width: 70%; padding: 10px; margin: 10px; border: 1px solid #ddd; border-radius: 5px; }
+        button { background: #007bff; color: white; padding: 10px 20px; border: none; border-radius: 5px; cursor: pointer; margin: 5px; }
+        button:hover { background: #0056b3; }
+        .result { margin-top: 20px; padding: 15px; border: 1px solid #ddd; border-radius: 5px; background: #f8f9fa; }
+        .video-info { background: #e9ecef; padding: 10px; margin: 10px 0; border-radius: 5px; word-break: break-all; }
+        .success { color: #155724; background: #d4edda; padding: 10px; border-radius: 5px; }
+        .error { color: #dc3545; background: #f8d7da; padding: 10px; border-radius: 5px; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🎬 Продвинутый анализатор видео ссылок</h1>
+        
+        <input type="text" id="filmUrl" 
+               value="https://ru1.hdreskaz.top/watch-film/4076646~Новый+Человек-паук~29-16-08"
+               placeholder="Введите URL фильма">
+        <br>
+        
+        <button onclick="deepAnalyze()">🔍 Глубокий анализ</button>
+        <button onclick="searchInPage()">📄 Поиск в исходном коде</button>
+        <button onclick="findPlayerData()">🎮 Поиск данных плеера</button>
+        <button onclick="clearResults()">🧹 Очистить</button>
+
+        <div id="result" class="result"></div>
+    </div>
+
+    <script>
+        async function deepAnalyze() {
+            const url = document.getElementById('filmUrl').value;
+            const resultDiv = document.getElementById('result');
+            resultDiv.innerHTML = '<div class="video-info">🕵️‍♂️ Начинаем глубокий анализ...</div>';
+
+            try {
+                // Получаем HTML через AllOrigins
+                const apiUrl = `https://api.allorigins.win/get?url=${encodeURIComponent(url)}`;
+                const response = await fetch(apiUrl);
+                const data = await response.json();
+                const html = data.contents;
+
+                await analyzeContent(html, url, resultDiv);
+            } catch (error) {
+                resultDiv.innerHTML = `<div class="error">❌ Ошибка: ${error.message}</div>`;
+            }
+        }
+
+        async function analyzeContent(html, originalUrl, resultDiv) {
+            let findings = [];
+            
+            // 1. Поиск iframe
+            const iframeRegex = /<iframe[^>]*src=["']([^"']+)["'][^>]*>/gi;
+            let iframeMatch;
+            while ((iframeMatch = iframeRegex.exec(html)) !== null) {
+                findings.push({type: 'iframe', url: iframeMatch[1]});
+            }
+
+            // 2. Поиск скриптов с видео данными
+            const scriptRegex = /<script[^>]*>([\s\S]*?)<\/script>/gi;
+            let scriptMatch;
+            while ((scriptMatch = scriptRegex.exec(html)) !== null) {
+                const scriptContent = scriptMatch[1];
+                
+                // Поиск m3u8 ссылок
+                const m3u8Matches = scriptContent.match(/(https?:\/\/[^"']*\.m3u8[^"']*)/gi);
+                if (m3u8Matches) {
+                    m3u8Matches.forEach(url => findings.push({type: 'm3u8', url: url}));
+                }
+
+                // Поиск mp4 ссылок
+                const mp4Matches = scriptContent.match(/(https?:\/\/[^"']*\.mp4[^"']*)/gi);
+                if (mp4Matches) {
+                    mp4Matches.forEach(url => findings.push({type: 'mp4', url: url}));
+                }
+
+                // Поиск JSON данных с видео
+                const jsonMatches = scriptContent.match(/(\{[^{}]*["']file["'][^{}*\}[^{}]*\})/gi);
+                if (jsonMatches) {
+                    jsonMatches.forEach(jsonStr => {
+                        try {
+                            const data = JSON.parse(jsonStr);
+                            if (data.file) {
+                                findings.push({type: 'json_video', url: data.file, data: data});
+                            }
+                        } catch (e) {}
+                    });
+                }
+
+                // Поиск переменных с видео ссылками
+                const varMatches = scriptContent.match(/(file|src|url)\s*[=:]\s*["']([^"']+\.(mp4|m3u8|webm))["']/gi);
+                if (varMatches) {
+                    varMatches.forEach(match => {
+                        const urlMatch = match.match(/["']([^"']+)["']/);
+                        if (urlMatch) {
+                            findings.push({type: 'js_variable', url: urlMatch[1], context: match});
+                        }
+                    });
+                }
+            }
+
+            // 3. Поиск в data-атрибутах
+            const dataAttrRegex = /data-(file|src|url)=["']([^"']+)["']/gi;
+            let dataMatch;
+            while ((dataMatch = dataAttrRegex.exec(html)) !== null) {
+                findings.push({type: 'data_attribute', url: dataMatch[2], attr: dataMatch[1]});
+            }
+
+            // 4. Поиск API endpoints
+            const apiRegex = /(https?:\/\/[^"']*\/api\/[^"']*|https?:\/\/[^"']*\/player\/[^"']*|https?:\/\/[^"']*\/video\/[^"']*)/gi;
+            const apiMatches = html.match(apiRegex);
+            if (apiMatches) {
+                apiMatches.forEach(url => findings.push({type: 'api_endpoint', url: url}));
+            }
+
+            // Отображаем результаты
+            displayFindings(findings, resultDiv, originalUrl);
+        }
+
+        function displayFindings(findings, resultDiv, originalUrl) {
+            if (findings.length === 0) {
+                resultDiv.innerHTML = '<div class="error">❌ Не найдено видео данных</div>';
+                return;
+            }
+
+            let html = `<div class="success">✅ Найдено ${findings.length} потенциальных источников видео</div>`;
+            
+            findings.forEach((finding, index) => {
+                const fullUrl = finding.url.startsWith('http') ? finding.url : new URL(finding.url, originalUrl).href;
+                
+                html += `
+                    <div class="video-info">
+                        <strong>🔍 Находка ${index + 1} (${finding.type}):</strong><br>
+                        <strong>URL:</strong> ${fullUrl}<br>
+                        ${finding.context ? `<strong>Контекст:</strong> ${finding.context}<br>` : ''}
+                        ${finding.attr ? `<strong>Атрибут:</strong> ${finding.attr}<br>` : ''}
+                        
+                        <button onclick="testVideoUrl('${fullUrl}')">🎬 Тестировать URL</button>
+                        <button onclick="copyToClipboard('${fullUrl}')">📋 Копировать</button>
+                        
+                        ${finding.type === 'm3u8' || finding.type === 'mp4' ? `
+                            <div style="margin-top: 10px;">
+                                <video controls width="300" height="200">
+                                    <source src="${fullUrl}" type="${finding.type === 'm3u8' ? 'application/x-mpegURL' : 'video/mp4'}">
+                                </video>
+                            </div>
+                        ` : ''}
+                    </div>
+                `;
+            });
+
+            resultDiv.innerHTML = html;
+        }
+
+        async function searchInPage() {
+            const url = document.getElementById('filmUrl').value;
+            const resultDiv = document.getElementById('result');
+            resultDiv.innerHTML = '<div class="video-info">🔍 Ищем в исходном коде...</div>';
+
+            try {
+                const apiUrl = `https://api.allorigins.win/get?url=${encodeURIComponent(url)}`;
+                const response = await fetch(apiUrl);
+                const data = await response.json();
+                const html = data.contents;
+
+                // Показываем исходный код для ручного поиска
+                resultDiv.innerHTML = `
+                    <div class="success">📄 Исходный код страницы:</div>
+                    <div class="video-info">
+                        <textarea style="width:100%; height:400px; font-family: monospace; font-size: 12px;" 
+                                  onclick="this.select()">${html}</textarea>
+                    </div>
+                    <div class="video-info">
+                        <strong>🔎 Ручной поиск:</strong><br>
+                        Используйте Ctrl+F для поиска по ключевым словам:<br>
+                        - file:<br>
+                        - src:<br> 
+                        - m3u8<br>
+                        - mp4<br>
+                        - video<br>
+                        - player<br>
+                        - iframe<br>
+                        - embed<br>
+                    </div>
+                `;
+            } catch (error) {
+                resultDiv.innerHTML = `<div class="error">❌ Ошибка: ${error.message}</div>`;
+            }
+        }
+
+        async function findPlayerData() {
+            const url = document.getElementById('filmUrl').value;
+            const resultDiv = document.getElementById('result');
+            resultDiv.innerHTML = '<div class="video-info">🎮 Ищем данные плеера...</div>';
+
+            try {
+                const apiUrl = `https://api.allorigins.win/get?url=${encodeURIComponent(url)}`;
+                const response = await fetch(apiUrl);
+                const data = await response.json();
+                const html = data.contents;
+
+                // Ищем специфичные паттерны для HDRezka
+                const patterns = {
+                    'video_data': /video\s*:\s*({[^}]+})/g,
+                    'file_data': /file\s*:\s*["']([^"']+)["']/g,
+                    'player_config': /player\.setup\s*\(([^)]+)\)/g,
+                    'stream_data': /stream\s*:\s*["']([^"']+)["']/g,
+                    'hls_url': /(https?:\/\/[^"']*\.m3u8[^"']*)/g,
+                    'mp4_url': /(https?:\/\/[^"']*\.mp4[^"']*)/g
+                };
+
+                let results = [];
+                for (const [patternName, pattern] of Object.entries(patterns)) {
+                    const matches = html.match(pattern);
+                    if (matches) {
+                        matches.forEach(match => {
+                            results.push({type: patternName, data: match});
+                        });
+                    }
+                }
+
+                if (results.length > 0) {
+                    let htmlOutput = '<div class="success">✅ Найдены данные плеера:</div>';
+                    results.forEach((result, index) => {
+                        htmlOutput += `
+                            <div class="video-info">
+                                <strong>${index + 1}. ${result.type}:</strong><br>
+                                <code>${result.data}</code>
+                            </div>
+                        `;
+                    });
+                    resultDiv.innerHTML = htmlOutput;
+                } else {
+                    resultDiv.innerHTML = '<div class="error">❌ Данные плеера не найдены</div>';
+                }
+
+            } catch (error) {
+                resultDiv.innerHTML = `<div class="error">❌ Ошибка: ${error.message}</div>`;
+            }
+        }
+
+        async function testVideoUrl(videoUrl) {
+            const resultDiv = document.getElementById('result');
+            resultDiv.innerHTML += `<div class="video-info">🧪 Тестируем URL: ${videoUrl}</div>`;
+
+            try {
+                const testResponse = await fetch(videoUrl, {method: 'HEAD'});
+                if (testResponse.ok) {
+                    resultDiv.innerHTML += `<div class="success">✅ URL доступен! Статус: ${testResponse.status}</div>`;
+                    
+                    // Показываем видео плеер
+                    resultDiv.innerHTML += `
+                        <div class="video-info">
+                            <strong>🎬 Видео плеер:</strong><br>
+                            <video controls width="100%" style="max-width: 600px;">
+                                <source src="${videoUrl}" type="video/mp4">
+                                Ваш браузер не поддерживает видео тег.
+                            </video>
+                        </div>
+                    `;
+                } else {
+                    resultDiv.innerHTML += `<div class="error">❌ URL недоступен! Статус: ${testResponse.status}</div>`;
+                }
+            } catch (error) {
+                resultDiv.innerHTML += `<div class="error">❌ Ошибка тестирования: ${error.message}</div>`;
+            }
+        }
+
+        function copyToClipboard(text) {
+            navigator.clipboard.writeText(text).then(() => {
+                alert('✅ Ссылка скопирована в буфер обмена!');
+            });
+        }
+
+        function clearResults() {
+            document.getElementById('result').innerHTML = '';
+        }
+    </script>
+</body>
+</html>
